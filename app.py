@@ -19,102 +19,163 @@ st.title("🏛️ Institutional Quantamental & Derivatives Terminal")
 st.caption("Advanced data engine processing multi-factor DCF, Technicals, Greeks, Fama-French Regressions, and NLP Sentiment.")
 
 # ==========================================
-# PART 1: CORE CALCULATION ENGINES (CACHED)
+# PART 1: CORE CALCULATION ENGINES (FMP API)
 # ==========================================
+import requests
 import time
 
-@st.cache_data(ttl=3600)
+# Securely pull the API key from Streamlit's Vault
+try:
+    API_KEY = st.secrets["FMP_API_KEY"]
+except:
+    st.error("🔴 API Key missing. Please add FMP_API_KEY to Streamlit Secrets.")
+    API_KEY = "demo"
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_live_hyperscaler_capex():
     try:
         hyperscalers = ['MSFT', 'GOOGL', 'AMZN', 'META']
-        current_spend = sum([abs(yf.Ticker(t).cashflow.loc['Capital Expenditure'].iloc[0]) for t in hyperscalers])
-        prior_spend = sum([abs(yf.Ticker(t).cashflow.loc['Capital Expenditure'].iloc[1]) for t in hyperscalers])
+        current_spend, prior_spend = 0, 0
+        for t in hyperscalers:
+            url = f"https://financialmodelingprep.com/api/v3/cash-flow-statement/{t}?limit=2&apikey={API_KEY}"
+            res = requests.get(url).json()
+            if len(res) >= 2:
+                current_spend += abs(res[0].get('capitalExpenditure', 0))
+                prior_spend += abs(res[1].get('capitalExpenditure', 0))
         return (current_spend - prior_spend) / prior_spend if prior_spend > 0 else 0.25
     except: return 0.25
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def run_fundamental_engine(ticker_symbol, capex_growth, capture_eff):
-    for attempt in range(3): # Try 3 times before failing
-        try:
-            ticker = yf.Ticker(ticker_symbol)
-            info = ticker.info
-            price = info.get('currentPrice', info.get('previousClose', 1.0))
-            cf = ticker.cashflow
-            if cf.empty: raise ValueError("Empty Cashflow")
-            fcf = cf.loc['Free Cash Flow'].iloc[0] if 'Free Cash Flow' in cf.index else 100000000
-            fcf_per_share = fcf / info.get('sharesOutstanding', 1)
-            gamma = 1 + (capex_growth * capture_eff)
-            g_adj = 0.12 * gamma
-            dcf_val = 0
-            for prob, g in [(0.3, g_adj*1.4), (0.5, g_adj), (0.2, 0.12*0.5)]:
-                cf_sum = sum((fcf_per_share * (1+g)**t) / (1.095)**t for t in range(1, 6))
-                tv = ((fcf_per_share * (1+g)**5 * 1.03) / (0.095 - 0.03)) / (1.095)**5
-                dcf_val += prob * (cf_sum + tv)
-            return {"price": price, "gamma": gamma, "growth": g_adj, "value": dcf_val, "mos": (dcf_val-price)/price * 100}
-        except Exception as e:
-            time.sleep(1.5) # Wait 1.5 seconds and try again
-    return None
-
-@st.cache_data(ttl=900, show_spinner=False)
-def get_advanced_ta(ticker_symbol):
-    for attempt in range(3):
-        try:
-            hist = yf.Ticker(ticker_symbol).history(period="6mo")
-            if hist.empty: raise ValueError("Empty History")
-            close = hist['Close']
-            hist['SMA_20'] = close.rolling(20).mean()
-            std = close.rolling(20).std()
-            hist['Upper_Band'] = hist['SMA_20'] + (std * 2)
-            hist['Lower_Band'] = hist['SMA_20'] - (std * 2)
-            delta = close.diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            hist['RSI'] = 100 - (100 / (1 + rs))
-            ema_12 = close.ewm(span=12, adjust=False).mean()
-            ema_26 = close.ewm(span=26, adjust=False).mean()
-            hist['MACD'] = ema_12 - ema_26
-            hist['Signal_Line'] = hist['MACD'].ewm(span=9, adjust=False).mean()
-            return hist
-        except:
-            time.sleep(1.5)
-    return None
-
-@st.cache_data(ttl=900, show_spinner=False)
-def get_options_chain(ticker_symbol, current_price):
     try:
-        ticker = yf.Ticker(ticker_symbol)
-        nearest_date = ticker.options[0]
-        chain = ticker.option_chain(nearest_date)
-        calls = chain.calls[(chain.calls['strike'] > current_price * 0.9) & (chain.calls['strike'] < current_price * 1.1)].copy()
-        return nearest_date, calls
-    except: return None, None
+        # Pull Quote and Cash Flow
+        q_url = f"https://financialmodelingprep.com/api/v3/quote/{ticker_symbol}?apikey={API_KEY}"
+        cf_url = f"https://financialmodelingprep.com/api/v3/cash-flow-statement/{ticker_symbol}?limit=1&apikey={API_KEY}"
+        
+        q_data = requests.get(q_url).json()[0]
+        cf_data = requests.get(cf_url).json()[0]
+        
+        price = q_data.get('price', 1.0)
+        shares = q_data.get('sharesOutstanding', 1)
+        fcf = cf_data.get('freeCashFlow', 100000000)
+        
+        fcf_per_share = fcf / shares if shares > 0 else fcf
+        gamma = 1 + (capex_growth * capture_eff)
+        g_adj = 0.12 * gamma
+        dcf_val = 0
+        
+        for prob, g in [(0.3, g_adj*1.4), (0.5, g_adj), (0.2, 0.12*0.5)]:
+            cf_sum = sum((fcf_per_share * (1+g)**t) / (1.095)**t for t in range(1, 6))
+            tv = ((fcf_per_share * (1+g)**5 * 1.03) / (0.095 - 0.03)) / (1.095)**5
+            dcf_val += prob * (cf_sum + tv)
+            
+        return {"price": price, "gamma": gamma, "growth": g_adj, "value": dcf_val, "mos": (dcf_val-price)/price * 100}
+    except Exception as e: return None
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_advanced_ta(ticker_symbol):
+    try:
+        url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{ticker_symbol}?timeseries=150&apikey={API_KEY}"
+        res = requests.get(url).json()
+        if "historical" not in res: return None
+        
+        df = pd.DataFrame(res["historical"])
+        df['Date'] = pd.to_datetime(df['date'])
+        df.set_index('Date', inplace=True)
+        df.sort_index(ascending=True, inplace=True) # Oldest to newest
+        
+        close = df['close']
+        df['SMA_20'] = close.rolling(20).mean()
+        std = close.rolling(20).std()
+        df['Upper_Band'] = df['SMA_20'] + (std * 2)
+        df['Lower_Band'] = df['SMA_20'] - (std * 2)
+        
+        delta = close.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+        
+        ema_12 = close.ewm(span=12, adjust=False).mean()
+        ema_26 = close.ewm(span=26, adjust=False).mean()
+        df['MACD'] = ema_12 - ema_26
+        df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        
+        # Rename for UI compatibility
+        df.rename(columns={'close': 'Close'}, inplace=True)
+        return df
+    except: return None
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_options_chain(ticker_symbol, current_price):
+    # Free tier does not support options. Gracefully return None to trigger UI warning.
+    return None, None
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def run_monte_carlo(ticker_symbol, target_days, simulations=1000):
     try:
-        hist = yf.Ticker(ticker_symbol).history(period="1y")
-        if hist.empty: return None, None
-        returns = hist['Close'].pct_change().dropna()
-        last_price = hist['Close'].iloc[-1]
+        url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{ticker_symbol}?timeseries=252&apikey={API_KEY}"
+        res = requests.get(url).json()
+        df = pd.DataFrame(res["historical"])
+        df.sort_values('date', inplace=True)
+        
+        returns = df['close'].pct_change().dropna()
+        last_price = df['close'].iloc[-1]
         mu, vol = returns.mean(), returns.std()  
+        
         sim_data = {x: [last_price] for x in range(simulations)}
         for x in range(simulations):
             for _ in range(target_days): sim_data[x].append(sim_data[x][-1] * (np.random.normal(mu, vol) + 1))
+            
         sim_df = pd.DataFrame(sim_data)
         final_prices = sim_df.iloc[-1]
         percentiles = {"95th": np.percentile(final_prices, 95), "50th": np.percentile(final_prices, 50), "5th": np.percentile(final_prices, 5)}
         return sim_df, percentiles
     except: return None, None
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
+def run_fama_french(ticker_symbol):
+    if not os.path.exists('ff_factors.csv'): return "Error: ff_factors.csv file not found."
+    try:
+        # Load Fama-French Data
+        ff = pd.read_csv('ff_factors.csv', skiprows=3, index_col=0)
+        ff.index = ff.index.astype(str).str.strip()
+        ff = ff[ff.index.str.len() == 6] 
+        ff.index = pd.to_datetime(ff.index, format='%Y%m').to_period('M')
+        ff = ff.apply(pd.to_numeric, errors='coerce').dropna()
+        
+        # Load FMP Monthly Data
+        url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{ticker_symbol}?timeseries=1200&apikey={API_KEY}"
+        res = requests.get(url).json()
+        stock = pd.DataFrame(res["historical"])
+        stock['date'] = pd.to_datetime(stock['date'])
+        stock.set_index('date', inplace=True)
+        stock.sort_index(ascending=True, inplace=True)
+        
+        # Resample to monthly and calculate returns
+        monthly_stock = stock['close'].resample('M').last()
+        ret = monthly_stock.pct_change().dropna() * 100
+        ret.index = ret.index.to_period('M')
+        
+        merged = ff.join(ret.rename('Target_Return'), how='inner').dropna()
+        merged['Excess_Return'] = merged['Target_Return'] - merged['RF']
+        X = sm.add_constant(merged[['Mkt-RF', 'SMB', 'HML']])
+        model = sm.OLS(merged['Excess_Return'], X).fit()
+        return {'Alpha': model.params['const'], 'Beta': model.params['Mkt-RF'], 'SMB': model.params['SMB'], 'HML': model.params['HML'], 'R2': model.rsquared}
+    except Exception as e: return f"Error executing regression: {e}"
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def run_nlp_sentiment(ticker_symbol):
     try:
-        ticker = yf.Ticker(ticker_symbol)
-        corpus = ticker.info.get('longBusinessSummary', '')
-        news = ticker.news
-        if news:
-            for item in news: corpus += " " + item.get('title', '') + " " + item.get('summary', '')
+        prof_url = f"https://financialmodelingprep.com/api/v3/profile/{ticker_symbol}?apikey={API_KEY}"
+        news_url = f"https://financialmodelingprep.com/api/v3/stock_news?tickers={ticker_symbol}&limit=10&apikey={API_KEY}"
+        
+        prof_data = requests.get(prof_url).json()
+        news_data = requests.get(news_url).json()
+        
+        corpus = prof_data[0].get('description', '') if prof_data else ""
+        if news_data:
+            for item in news_data: corpus += " " + item.get('title', '') + " " + item.get('text', '')
             
         if not corpus: return None
         
@@ -135,8 +196,7 @@ def run_nlp_sentiment(ticker_symbol):
             "status": status,
             "word_count": len(corpus.split())
         }
-    except Exception as e:
-        return None
+    except Exception as e: return None
 
 # ==========================================
 # PART 2: TERMINAL UI (SIDEBAR)
