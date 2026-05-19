@@ -165,11 +165,8 @@ def run_fama_french(ticker_symbol):
 @st.cache_data(ttl=3600, show_spinner=False)
 def run_nlp_sentiment(ticker_symbol):
     try:
-        prof_url = f"https://financialmodelingprep.com/api/v3/profile/{ticker_symbol}?apikey={API_KEY}"
-        news_url = f"https://financialmodelingprep.com/api/v3/stock_news?tickers={ticker_symbol}&limit=10&apikey={API_KEY}"
-        
-        prof_data = requests.get(prof_url).json()
-        news_data = requests.get(news_url).json()
+        prof_data = fetch_fmp(f"profile/{ticker_symbol}")
+        news_data = fetch_fmp(f"stock_news?tickers={ticker_symbol}&limit=10")
         
         corpus = prof_data[0].get('description', '') if prof_data else ""
         if news_data:
@@ -177,9 +174,7 @@ def run_nlp_sentiment(ticker_symbol):
             
         if not corpus: return None
         
-        blob = TextBlob(corpus)
-        polarity = blob.sentiment.polarity
-        
+        # Institutional "Lie Detector" Logic (Pure Regex)
         uncertainty_words = len(re.findall(r'\b(if|may|might|subject to|risk|uncertain|volatile|headwinds)\b', corpus.lower()))
         conviction_words = len(re.findall(r'\b(strong|accelerate|expand|growth|confident|robust|surge|scale)\b', corpus.lower()))
         
@@ -188,14 +183,13 @@ def run_nlp_sentiment(ticker_symbol):
         else: status = "⚪ Neutral Language"
         
         return {
-            "polarity": polarity,
+            "polarity": 0.00, # Deprecated TextBlob score
             "conviction": conviction_words,
             "uncertainty": uncertainty_words,
             "status": status,
             "word_count": len(corpus.split())
         }
     except Exception as e: return None
-
 # ==========================================
 # PART 2: TERMINAL UI (SIDEBAR)
 # ==========================================
