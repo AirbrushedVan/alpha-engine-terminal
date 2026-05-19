@@ -19,8 +19,9 @@ st.title("🏛️ Institutional Quantamental & Derivatives Terminal")
 st.caption("Advanced data engine processing multi-factor DCF, Technicals, Greeks, Fama-French Regressions, and NLP Sentiment.")
 
 # ==========================================
-# PART 1: CORE CALCULATION ENGINES
+# PART 1: CORE CALCULATION ENGINES (CACHED)
 # ==========================================
+import time
 
 @st.cache_data(ttl=3600)
 def get_live_hyperscaler_capex():
@@ -31,44 +32,55 @@ def get_live_hyperscaler_capex():
         return (current_spend - prior_spend) / prior_spend if prior_spend > 0 else 0.25
     except: return 0.25
 
+@st.cache_data(ttl=900, show_spinner=False)
 def run_fundamental_engine(ticker_symbol, capex_growth, capture_eff):
-    ticker = yf.Ticker(ticker_symbol)
-    try:
-        info = ticker.info
-        price = info.get('currentPrice', info.get('previousClose', 1.0))
-        cf = ticker.cashflow
-        fcf = cf.loc['Free Cash Flow'].iloc[0] if 'Free Cash Flow' in cf.index else 100000000
-        fcf_per_share = fcf / info.get('sharesOutstanding', 1)
-        gamma = 1 + (capex_growth * capture_eff)
-        g_adj = 0.12 * gamma
-        dcf_val = 0
-        for prob, g in [(0.3, g_adj*1.4), (0.5, g_adj), (0.2, 0.12*0.5)]:
-            cf_sum = sum((fcf_per_share * (1+g)**t) / (1.095)**t for t in range(1, 6))
-            tv = ((fcf_per_share * (1+g)**5 * 1.03) / (0.095 - 0.03)) / (1.095)**5
-            dcf_val += prob * (cf_sum + tv)
-        return {"price": price, "gamma": gamma, "growth": g_adj, "value": dcf_val, "mos": (dcf_val-price)/price * 100}
-    except: return None
+    for attempt in range(3): # Try 3 times before failing
+        try:
+            ticker = yf.Ticker(ticker_symbol)
+            info = ticker.info
+            price = info.get('currentPrice', info.get('previousClose', 1.0))
+            cf = ticker.cashflow
+            if cf.empty: raise ValueError("Empty Cashflow")
+            fcf = cf.loc['Free Cash Flow'].iloc[0] if 'Free Cash Flow' in cf.index else 100000000
+            fcf_per_share = fcf / info.get('sharesOutstanding', 1)
+            gamma = 1 + (capex_growth * capture_eff)
+            g_adj = 0.12 * gamma
+            dcf_val = 0
+            for prob, g in [(0.3, g_adj*1.4), (0.5, g_adj), (0.2, 0.12*0.5)]:
+                cf_sum = sum((fcf_per_share * (1+g)**t) / (1.095)**t for t in range(1, 6))
+                tv = ((fcf_per_share * (1+g)**5 * 1.03) / (0.095 - 0.03)) / (1.095)**5
+                dcf_val += prob * (cf_sum + tv)
+            return {"price": price, "gamma": gamma, "growth": g_adj, "value": dcf_val, "mos": (dcf_val-price)/price * 100}
+        except Exception as e:
+            time.sleep(1.5) # Wait 1.5 seconds and try again
+    return None
 
+@st.cache_data(ttl=900, show_spinner=False)
 def get_advanced_ta(ticker_symbol):
-    try:
-        hist = yf.Ticker(ticker_symbol).history(period="6mo")
-        close = hist['Close']
-        hist['SMA_20'] = close.rolling(20).mean()
-        std = close.rolling(20).std()
-        hist['Upper_Band'] = hist['SMA_20'] + (std * 2)
-        hist['Lower_Band'] = hist['SMA_20'] - (std * 2)
-        delta = close.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        hist['RSI'] = 100 - (100 / (1 + rs))
-        ema_12 = close.ewm(span=12, adjust=False).mean()
-        ema_26 = close.ewm(span=26, adjust=False).mean()
-        hist['MACD'] = ema_12 - ema_26
-        hist['Signal_Line'] = hist['MACD'].ewm(span=9, adjust=False).mean()
-        return hist
-    except: return None
+    for attempt in range(3):
+        try:
+            hist = yf.Ticker(ticker_symbol).history(period="6mo")
+            if hist.empty: raise ValueError("Empty History")
+            close = hist['Close']
+            hist['SMA_20'] = close.rolling(20).mean()
+            std = close.rolling(20).std()
+            hist['Upper_Band'] = hist['SMA_20'] + (std * 2)
+            hist['Lower_Band'] = hist['SMA_20'] - (std * 2)
+            delta = close.diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / loss
+            hist['RSI'] = 100 - (100 / (1 + rs))
+            ema_12 = close.ewm(span=12, adjust=False).mean()
+            ema_26 = close.ewm(span=26, adjust=False).mean()
+            hist['MACD'] = ema_12 - ema_26
+            hist['Signal_Line'] = hist['MACD'].ewm(span=9, adjust=False).mean()
+            return hist
+        except:
+            time.sleep(1.5)
+    return None
 
+@st.cache_data(ttl=900, show_spinner=False)
 def get_options_chain(ticker_symbol, current_price):
     try:
         ticker = yf.Ticker(ticker_symbol)
@@ -78,31 +90,11 @@ def get_options_chain(ticker_symbol, current_price):
         return nearest_date, calls
     except: return None, None
 
-def run_fama_french(ticker_symbol):
-    if not os.path.exists('ff_factors.csv'):
-        return "Error: ff_factors.csv file not found in the current directory."
-    try:
-        ff = pd.read_csv('ff_factors.csv', skiprows=3, index_col=0)
-        ff.index = ff.index.astype(str).str.strip()
-        ff = ff[ff.index.str.len() == 6] 
-        ff.index = pd.to_datetime(ff.index, format='%Y%m').to_period('M')
-        ff = ff.apply(pd.to_numeric, errors='coerce').dropna()
-        
-        stock = yf.download(ticker_symbol, start='2019-01-01', interval='1mo', progress=False)['Close'].squeeze()
-        ret = stock.pct_change().dropna() * 100
-        ret.index = ret.index.to_period('M')
-        
-        merged = ff.join(ret.rename('Target_Return'), how='inner').dropna()
-        merged['Excess_Return'] = merged['Target_Return'] - merged['RF']
-        X = sm.add_constant(merged[['Mkt-RF', 'SMB', 'HML']])
-        model = sm.OLS(merged['Excess_Return'], X).fit()
-        return {'Alpha': model.params['const'], 'Beta': model.params['Mkt-RF'], 'SMB': model.params['SMB'], 'HML': model.params['HML'], 'R2': model.rsquared}
-    except Exception as e:
-        return f"Error executing regression: {e}"
-
+@st.cache_data(ttl=900, show_spinner=False)
 def run_monte_carlo(ticker_symbol, target_days, simulations=1000):
     try:
         hist = yf.Ticker(ticker_symbol).history(period="1y")
+        if hist.empty: return None, None
         returns = hist['Close'].pct_change().dropna()
         last_price = hist['Close'].iloc[-1]
         mu, vol = returns.mean(), returns.std()  
@@ -115,6 +107,7 @@ def run_monte_carlo(ticker_symbol, target_days, simulations=1000):
         return sim_df, percentiles
     except: return None, None
 
+@st.cache_data(ttl=900, show_spinner=False)
 def run_nlp_sentiment(ticker_symbol):
     try:
         ticker = yf.Ticker(ticker_symbol)
