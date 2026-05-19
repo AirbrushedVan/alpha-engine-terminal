@@ -1,5 +1,4 @@
 import streamlit as st
-import yfinance as yf
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
@@ -7,9 +6,8 @@ from scipy.stats import norm
 import warnings
 import os
 import requests
-from bs4 import BeautifulSoup
-from textblob import TextBlob
 import re
+import time
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
