@@ -1,9 +1,6 @@
 streamlit
-curl_cffi
 numpy
 pandas
 statsmodels
 scipy
-beautifulsoup4
-textblob
 requests
