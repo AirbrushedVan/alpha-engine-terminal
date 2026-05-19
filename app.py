@@ -167,8 +167,15 @@ if st.sidebar.button("⚡ Execute Full Terminal Analysis"):
         metrics = run_fundamental_engine(target, macro_growth, capture_eff)
         ta_data = get_advanced_ta(target)
         
-        if metrics and ta_data is not None:
-            # We now have 6 Tabs!
+        # --- ERROR TRAPPING ---
+        if metrics is None:
+            st.error(f"🔴 **CRITICAL FAILURE:** Could not fetch fundamental data for {target}. Yahoo Finance may be rate-limiting the cloud server, or the ticker is invalid. Try a major ticker like 'AAPL' to test the connection.")
+        
+        if ta_data is None:
+            st.error(f"🔴 **CRITICAL FAILURE:** Could not fetch historical price data for {target}. The technical analysis engine failed to initialize.")
+            
+        # --- RENDER TABS IF DATA EXISTS ---
+        if metrics is not None and ta_data is not None:
             tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
                 "📊 DCF Fundamentals", 
                 "📈 Technical Action", 
@@ -231,12 +238,16 @@ if st.sidebar.button("⚡ Execute Full Terminal Analysis"):
                     mc1.metric("5th Pctl (Drawdown)", f"${percentiles['5th']:.2f}")
                     with st.expander("👁️ View Raw Simulation Paths (Spaghetti Chart)"):
                         st.line_chart(sim_data.iloc[:, :100], width="stretch")
+                else:
+                    st.warning("Monte Carlo simulation failed to run.")
 
             with tab4:
                 st.subheader("Near-the-Money Derivative Analysis Layer")
                 _, opt_chain = get_options_chain(target, metrics['price'])
                 if opt_chain is not None:
                     st.dataframe(opt_chain, width="stretch")
+                else:
+                    st.warning("Options chain data unavailable for this ticker right now.")
 
             with tab5:
                 st.subheader("Fama-French 3-Factor Asset Pricing Regression")
@@ -256,14 +267,11 @@ if st.sidebar.button("⚡ Execute Full Terminal Analysis"):
                 nlp_res = run_nlp_sentiment(target)
                 if nlp_res:
                     st.markdown(f"**Corpus Scanned:** ~{nlp_res['word_count']} words (10-K Business Summaries & Recent Filings)")
-                    
                     st.metric("Overall Management Posture", nlp_res['status'])
-                    
                     c1, c2, c3 = st.columns(3)
                     c1.metric("Conviction Words", nlp_res['conviction'])
                     c2.metric("Uncertainty/Hedging Words", nlp_res['uncertainty'])
                     c3.metric("Raw Polarity Score", f"{nlp_res['polarity']:.2f}")
-                    
                     st.divider()
                     st.info("""
                     **How to read this:**
@@ -272,4 +280,4 @@ if st.sidebar.button("⚡ Execute Full Terminal Analysis"):
                     * A high ratio of Conviction to Uncertainty often precedes massive CapEx spending or earnings beats.
                     """)
                 else:
-                    st.error("Failed to parse NLP sentiment data for this ticker.")
+                    st.warning("Failed to parse NLP sentiment data. TextBlob may be missing dictionaries or no news was found.")
