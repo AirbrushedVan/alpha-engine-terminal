@@ -22,17 +22,23 @@ st.caption("Advanced data engine processing multi-factor DCF, Technicals, Greeks
 # PART 1: CORE CALCULATION ENGINES
 # ==========================================
 
+# --- YAHOO FINANCE FIREWALL BYPASS ---
+yf_session = requests.Session()
+yf_session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+})
+
 @st.cache_data(ttl=3600)
 def get_live_hyperscaler_capex():
     try:
         hyperscalers = ['MSFT', 'GOOGL', 'AMZN', 'META']
-        current_spend = sum([abs(yf.Ticker(t).cashflow.loc['Capital Expenditure'].iloc[0]) for t in hyperscalers])
-        prior_spend = sum([abs(yf.Ticker(t).cashflow.loc['Capital Expenditure'].iloc[1]) for t in hyperscalers])
+        current_spend = sum([abs(yf.Ticker(t, session=yf_session).cashflow.loc['Capital Expenditure'].iloc[0]) for t in hyperscalers])
+        prior_spend = sum([abs(yf.Ticker(t, session=yf_session).cashflow.loc['Capital Expenditure'].iloc[1]) for t in hyperscalers])
         return (current_spend - prior_spend) / prior_spend if prior_spend > 0 else 0.25
     except: return 0.25
 
 def run_fundamental_engine(ticker_symbol, capex_growth, capture_eff):
-    ticker = yf.Ticker(ticker_symbol)
+    ticker = yf.Ticker(ticker_symbol, session=yf_session)
     try:
         info = ticker.info
         price = info.get('currentPrice', info.get('previousClose', 1.0))
@@ -51,7 +57,7 @@ def run_fundamental_engine(ticker_symbol, capex_growth, capture_eff):
 
 def get_advanced_ta(ticker_symbol):
     try:
-        hist = yf.Ticker(ticker_symbol).history(period="6mo")
+        hist = yf.Ticker(ticker_symbol, session=yf_session).history(period="6mo")
         close = hist['Close']
         hist['SMA_20'] = close.rolling(20).mean()
         std = close.rolling(20).std()
@@ -71,7 +77,7 @@ def get_advanced_ta(ticker_symbol):
 
 def get_options_chain(ticker_symbol, current_price):
     try:
-        ticker = yf.Ticker(ticker_symbol)
+        ticker = yf.Ticker(ticker_symbol, session=yf_session)
         nearest_date = ticker.options[0]
         chain = ticker.option_chain(nearest_date)
         calls = chain.calls[(chain.calls['strike'] > current_price * 0.9) & (chain.calls['strike'] < current_price * 1.1)].copy()
@@ -88,7 +94,7 @@ def run_fama_french(ticker_symbol):
         ff.index = pd.to_datetime(ff.index, format='%Y%m').to_period('M')
         ff = ff.apply(pd.to_numeric, errors='coerce').dropna()
         
-        stock = yf.download(ticker_symbol, start='2019-01-01', interval='1mo', progress=False)['Close'].squeeze()
+        stock = yf.download(ticker_symbol, start='2019-01-01', interval='1mo', progress=False, session=yf_session)['Close'].squeeze()
         ret = stock.pct_change().dropna() * 100
         ret.index = ret.index.to_period('M')
         
@@ -102,7 +108,7 @@ def run_fama_french(ticker_symbol):
 
 def run_monte_carlo(ticker_symbol, target_days, simulations=1000):
     try:
-        hist = yf.Ticker(ticker_symbol).history(period="1y")
+        hist = yf.Ticker(ticker_symbol, session=yf_session).history(period="1y")
         returns = hist['Close'].pct_change().dropna()
         last_price = hist['Close'].iloc[-1]
         mu, vol = returns.mean(), returns.std()  
@@ -116,11 +122,8 @@ def run_monte_carlo(ticker_symbol, target_days, simulations=1000):
     except: return None, None
 
 def run_nlp_sentiment(ticker_symbol):
-    """Scrapes corporate text (10-K summary and recent filings/news) to measure Management Conviction vs Uncertainty."""
     try:
-        ticker = yf.Ticker(ticker_symbol)
-        
-        # Pull the official business summary (sourced directly from 10-K filings) and recent news
+        ticker = yf.Ticker(ticker_symbol, session=yf_session)
         corpus = ticker.info.get('longBusinessSummary', '')
         news = ticker.news
         if news:
@@ -128,12 +131,9 @@ def run_nlp_sentiment(ticker_symbol):
             
         if not corpus: return None
         
-        # Base NLP Sentiment
         blob = TextBlob(corpus)
         polarity = blob.sentiment.polarity
         
-        # Institutional "Lie Detector" Logic
-        # We count high-conviction words vs hedging/uncertainty words
         uncertainty_words = len(re.findall(r'\b(if|may|might|subject to|risk|uncertain|volatile|headwinds)\b', corpus.lower()))
         conviction_words = len(re.findall(r'\b(strong|accelerate|expand|growth|confident|robust|surge|scale)\b', corpus.lower()))
         
