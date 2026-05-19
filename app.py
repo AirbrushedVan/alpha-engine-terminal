@@ -7,7 +7,6 @@ import warnings
 import os
 import requests
 import re
-import time
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -19,15 +18,42 @@ st.caption("Advanced data engine processing multi-factor DCF, Technicals, Greeks
 # ==========================================
 # PART 1: CORE CALCULATION ENGINES (FMP API)
 # ==========================================
-import requests
-import time
 
-# Securely pull the API key from Streamlit's Vault
+# Securely pull the API key
 try:
     API_KEY = st.secrets["FMP_API_KEY"]
 except:
-    st.error("🔴 API Key missing. Please add FMP_API_KEY to Streamlit Secrets.")
     API_KEY = "demo"
+
+# --- THE INSTITUTIONAL NETWORK CALLER (DIAGNOSTIC MODE) ---
+def fetch_fmp(endpoint):
+    separator = "&" if "?" in endpoint else "?"
+    url = f"https://financialmodelingprep.com/api/v3/{endpoint}{separator}apikey={API_KEY}"
+    
+    try:
+        res = requests.get(url, timeout=5)
+        
+        if res.status_code != 200:
+            st.error(f"🛑 **HTTP Error {res.status_code} on {endpoint}:** {res.text}")
+            return None
+            
+        data = res.json()
+        
+        if isinstance(data, dict) and "Error Message" in data:
+            st.error(f"🛑 **FMP API REJECTED:** {data['Error Message']}")
+            return None
+            
+        if isinstance(data, list) and len(data) == 0:
+            st.warning(f"⚠️ **Empty Data Warning:** FMP returned blank data for {endpoint}. The API key might not have access to this specific ticker.")
+            
+        return data
+        
+    except requests.exceptions.Timeout:
+        st.error(f"⏱️ **TIMEOUT:** The request to {endpoint} took longer than 5 seconds.")
+        return None
+    except Exception as e:
+        st.error(f"💥 **NETWORK CRASH on {endpoint}:** {e}")
+        return None
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_live_hyperscaler_capex():
@@ -35,9 +61,8 @@ def get_live_hyperscaler_capex():
         hyperscalers = ['MSFT', 'GOOGL', 'AMZN', 'META']
         current_spend, prior_spend = 0, 0
         for t in hyperscalers:
-            url = f"https://financialmodelingprep.com/api/v3/cash-flow-statement/{t}?limit=2&apikey={API_KEY}"
-            res = requests.get(url).json()
-            if len(res) >= 2:
+            res = fetch_fmp(f"cash-flow-statement/{t}?limit=2")
+            if res and len(res) >= 2:
                 current_spend += abs(res[0].get('capitalExpenditure', 0))
                 prior_spend += abs(res[1].get('capitalExpenditure', 0))
         return (current_spend - prior_spend) / prior_spend if prior_spend > 0 else 0.25
@@ -46,16 +71,14 @@ def get_live_hyperscaler_capex():
 @st.cache_data(ttl=3600, show_spinner=False)
 def run_fundamental_engine(ticker_symbol, capex_growth, capture_eff):
     try:
-        # Pull Quote and Cash Flow
-        q_url = f"https://financialmodelingprep.com/api/v3/quote/{ticker_symbol}?apikey={API_KEY}"
-        cf_url = f"https://financialmodelingprep.com/api/v3/cash-flow-statement/{ticker_symbol}?limit=1&apikey={API_KEY}"
+        q_data = fetch_fmp(f"quote/{ticker_symbol}")
+        cf_data = fetch_fmp(f"cash-flow-statement/{ticker_symbol}?limit=1")
         
-        q_data = requests.get(q_url).json()[0]
-        cf_data = requests.get(cf_url).json()[0]
+        if not q_data or not cf_data: return None
         
-        price = q_data.get('price', 1.0)
-        shares = q_data.get('sharesOutstanding', 1)
-        fcf = cf_data.get('freeCashFlow', 100000000)
+        price = q_data[0].get('price', 1.0)
+        shares = q_data[0].get('sharesOutstanding', 1)
+        fcf = cf_data[0].get('freeCashFlow', 100000000)
         
         fcf_per_share = fcf / shares if shares > 0 else fcf
         gamma = 1 + (capex_growth * capture_eff)
@@ -68,19 +91,18 @@ def run_fundamental_engine(ticker_symbol, capex_growth, capture_eff):
             dcf_val += prob * (cf_sum + tv)
             
         return {"price": price, "gamma": gamma, "growth": g_adj, "value": dcf_val, "mos": (dcf_val-price)/price * 100}
-    except Exception as e: return None
+    except: return None
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_advanced_ta(ticker_symbol):
     try:
-        url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{ticker_symbol}?timeseries=150&apikey={API_KEY}"
-        res = requests.get(url).json()
-        if "historical" not in res: return None
+        res = fetch_fmp(f"historical-price-full/{ticker_symbol}?timeseries=150")
+        if not res or "historical" not in res: return None
         
         df = pd.DataFrame(res["historical"])
         df['Date'] = pd.to_datetime(df['date'])
         df.set_index('Date', inplace=True)
-        df.sort_index(ascending=True, inplace=True) # Oldest to newest
+        df.sort_index(ascending=True, inplace=True) 
         
         close = df['close']
         df['SMA_20'] = close.rolling(20).mean()
@@ -99,21 +121,20 @@ def get_advanced_ta(ticker_symbol):
         df['MACD'] = ema_12 - ema_26
         df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
         
-        # Rename for UI compatibility
         df.rename(columns={'close': 'Close'}, inplace=True)
         return df
     except: return None
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_options_chain(ticker_symbol, current_price):
-    # Free tier does not support options. Gracefully return None to trigger UI warning.
     return None, None
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def run_monte_carlo(ticker_symbol, target_days, simulations=1000):
     try:
-        url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{ticker_symbol}?timeseries=252&apikey={API_KEY}"
-        res = requests.get(url).json()
+        res = fetch_fmp(f"historical-price-full/{ticker_symbol}?timeseries=252")
+        if not res or "historical" not in res: return None, None
+        
         df = pd.DataFrame(res["historical"])
         df.sort_values('date', inplace=True)
         
@@ -135,22 +156,20 @@ def run_monte_carlo(ticker_symbol, target_days, simulations=1000):
 def run_fama_french(ticker_symbol):
     if not os.path.exists('ff_factors.csv'): return "Error: ff_factors.csv file not found."
     try:
-        # Load Fama-French Data
         ff = pd.read_csv('ff_factors.csv', skiprows=3, index_col=0)
         ff.index = ff.index.astype(str).str.strip()
         ff = ff[ff.index.str.len() == 6] 
         ff.index = pd.to_datetime(ff.index, format='%Y%m').to_period('M')
         ff = ff.apply(pd.to_numeric, errors='coerce').dropna()
         
-        # Load FMP Monthly Data
-        url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{ticker_symbol}?timeseries=1200&apikey={API_KEY}"
-        res = requests.get(url).json()
+        res = fetch_fmp(f"historical-price-full/{ticker_symbol}?timeseries=1200")
+        if not res or "historical" not in res: return "Error: Could not fetch historical data for Fama-French."
+        
         stock = pd.DataFrame(res["historical"])
         stock['date'] = pd.to_datetime(stock['date'])
         stock.set_index('date', inplace=True)
         stock.sort_index(ascending=True, inplace=True)
         
-        # Resample to monthly and calculate returns
         monthly_stock = stock['close'].resample('M').last()
         ret = monthly_stock.pct_change().dropna() * 100
         ret.index = ret.index.to_period('M')
@@ -174,7 +193,6 @@ def run_nlp_sentiment(ticker_symbol):
             
         if not corpus: return None
         
-        # Institutional "Lie Detector" Logic (Pure Regex)
         uncertainty_words = len(re.findall(r'\b(if|may|might|subject to|risk|uncertain|volatile|headwinds)\b', corpus.lower()))
         conviction_words = len(re.findall(r'\b(strong|accelerate|expand|growth|confident|robust|surge|scale)\b', corpus.lower()))
         
@@ -183,17 +201,18 @@ def run_nlp_sentiment(ticker_symbol):
         else: status = "⚪ Neutral Language"
         
         return {
-            "polarity": 0.00, # Deprecated TextBlob score
+            "polarity": 0.00,
             "conviction": conviction_words,
             "uncertainty": uncertainty_words,
             "status": status,
             "word_count": len(corpus.split())
         }
     except Exception as e: return None
+
 # ==========================================
 # PART 2: TERMINAL UI (SIDEBAR)
 # ==========================================
-target = st.sidebar.text_input("Target Ticker:", value="VRT").upper().strip()
+target = st.sidebar.text_input("Target Ticker:", value="AAPL").upper().strip()
 macro_growth = st.sidebar.slider("Hyperscaler CapEx Expansion:", 0.0, 1.0, 0.25, format="%.1f%%")
 capture_eff = st.sidebar.slider("Asset Capture Efficiency Matrix:", 0.0, 1.0, 0.50)
 sim_days = st.sidebar.slider("Risk Matrix Days:", 30, 365, 252)
@@ -206,14 +225,12 @@ if st.sidebar.button("⚡ Execute Full Terminal Analysis"):
         metrics = run_fundamental_engine(target, macro_growth, capture_eff)
         ta_data = get_advanced_ta(target)
         
-        # --- ERROR TRAPPING ---
         if metrics is None:
-            st.error(f"🔴 **CRITICAL FAILURE:** Could not fetch fundamental data for {target}. Yahoo Finance may be rate-limiting the cloud server, or the ticker is invalid. Try a major ticker like 'AAPL' to test the connection.")
+            st.error(f"🔴 **CRITICAL FAILURE:** Could not fetch fundamental data for {target}.")
         
         if ta_data is None:
-            st.error(f"🔴 **CRITICAL FAILURE:** Could not fetch historical price data for {target}. The technical analysis engine failed to initialize.")
+            st.error(f"🔴 **CRITICAL FAILURE:** Could not fetch historical price data for {target}.")
             
-        # --- RENDER TABS IF DATA EXISTS ---
         if metrics is not None and ta_data is not None:
             tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
                 "📊 DCF Fundamentals", 
@@ -282,11 +299,7 @@ if st.sidebar.button("⚡ Execute Full Terminal Analysis"):
 
             with tab4:
                 st.subheader("Near-the-Money Derivative Analysis Layer")
-                _, opt_chain = get_options_chain(target, metrics['price'])
-                if opt_chain is not None:
-                    st.dataframe(opt_chain, width="stretch")
-                else:
-                    st.warning("Options chain data unavailable for this ticker right now.")
+                st.info("Institutional Options Chain data is unavailable on the current API tier.")
 
             with tab5:
                 st.subheader("Fama-French 3-Factor Asset Pricing Regression")
@@ -305,12 +318,11 @@ if st.sidebar.button("⚡ Execute Full Terminal Analysis"):
                 st.subheader("NLP Management Sentiment & 'Lie Detector'")
                 nlp_res = run_nlp_sentiment(target)
                 if nlp_res:
-                    st.markdown(f"**Corpus Scanned:** ~{nlp_res['word_count']} words (10-K Business Summaries & Recent Filings)")
+                    st.markdown(f"**Corpus Scanned:** ~{nlp_res['word_count']} words (Business Summaries & Recent Filings)")
                     st.metric("Overall Management Posture", nlp_res['status'])
-                    c1, c2, c3 = st.columns(3)
+                    c1, c2 = st.columns(2)
                     c1.metric("Conviction Words", nlp_res['conviction'])
                     c2.metric("Uncertainty/Hedging Words", nlp_res['uncertainty'])
-                    c3.metric("Raw Polarity Score", f"{nlp_res['polarity']:.2f}")
                     st.divider()
                     st.info("""
                     **How to read this:**
@@ -319,4 +331,4 @@ if st.sidebar.button("⚡ Execute Full Terminal Analysis"):
                     * A high ratio of Conviction to Uncertainty often precedes massive CapEx spending or earnings beats.
                     """)
                 else:
-                    st.warning("Failed to parse NLP sentiment data. TextBlob may be missing dictionaries or no news was found.")
+                    st.warning("Failed to parse NLP sentiment data. No news was found.")
